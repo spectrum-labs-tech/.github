@@ -1,0 +1,103 @@
+name: "Discord notify"
+description: >-
+  Post a CI/CD status message to a Discord channel via webhook. Builds a Discord embed from the
+  workflow context (repo, branch, commit, actor, run link) plus the given status, and POSTs it.
+  Use it directly as an in-job step (e.g. `if: ${{ failure() }}`) for surgical/per-step alerts, or
+  via the `discord-cicd-notify.yaml` reusable workflow for the common once-per-run failure ping.
+  Needs `curl` and `jq` on the runner (present on ubuntu-latest and the self-hosted homelab runners).
+
+inputs:
+  webhook:
+    description: "Discord webhook URL. Pass a GitHub secret -- never hardcode it."
+    required: true
+  status:
+    description: "success | failure | cancelled (drives colour + emoji). Any other value -> neutral info."
+    required: false
+    default: "failure"
+  title:
+    description: "Optional title override. Default is derived from status + workflow name."
+    required: false
+    default: ""
+  message:
+    description: "Optional extra description line (e.g. which job/step failed)."
+    required: false
+    default: ""
+
+runs:
+  using: "composite"
+  steps:
+    - name: Post to Discord
+      shell: bash
+      env:
+        WEBHOOK: ${{ inputs.webhook }}
+        STATUS: ${{ inputs.status }}
+        TITLE_IN: ${{ inputs.title }}
+        MESSAGE_IN: ${{ inputs.message }}
+      run: |
+        set -euo pipefail
+        : "${WEBHOOK:?discord-notify: the 'webhook' input is required (pass a GitHub secret)}"
+
+        # Colour is a Discord decimal RGB (green / red / grey / blurple).
+        case "$STATUS" in
+          success)   color=3066993;  word="succeeded" ;;
+          failure)   color=15158332; word="failed" ;;
+          cancelled) color=9807270;  word="cancelled" ;;
+          *)         color=5793266;  word="$STATUS" ;;
+        esac
+
+        short_sha="${GITHUB_SHA:0:7}"
+        branch="${GITHUB_REF_NAME:-${GITHUB_REF:-unknown}}"
+        run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+        commit_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/commit/${GITHUB_SHA}"
+
+        # Build the payload entirely inside jq: it emits UTF-8 from the ASCII \u escapes below, so no
+        # non-ASCII crosses a shell/argv boundary (which would mangle it to '?' on some platforms). All
+        # dynamic values are jq --args, so branch names / messages can't break the JSON or inject.
+        payload=$(jq -n \
+          --arg status "$STATUS" \
+          --arg word "$word" \
+          --arg title_override "$TITLE_IN" \
+          --arg msg "$MESSAGE_IN" \
+          --argjson color "$color" \
+          --arg repo "$GITHUB_REPOSITORY" \
+          --arg branch "$branch" \
+          --arg sha "$short_sha" \
+          --arg commit_url "$commit_url" \
+          --arg actor "$GITHUB_ACTOR" \
+          --arg wf "$GITHUB_WORKFLOW" \
+          --arg run_url "$run_url" \
+          '
+            ($status
+              | if   . == "success"   then "\u2705"
+                elif . == "failure"   then "\u274c"
+                elif . == "cancelled" then "\u26aa"
+                else "\u2139\ufe0f" end) as $emoji
+            | {
+                embeds: [(
+                  {
+                    title: (if $title_override == "" then ($emoji + " CI " + $word + ": " + $wf) else $title_override end),
+                    url: $run_url,
+                    color: $color,
+                    fields: [
+                      {name: "Repo",     value: $repo,   inline: true},
+                      {name: "Branch",   value: $branch, inline: true},
+                      {name: "Commit",   value: ("[`" + $sha + "`](" + $commit_url + ")"), inline: true},
+                      {name: "Actor",    value: $actor,  inline: true},
+                      {name: "Workflow", value: $wf,     inline: true}
+                    ]
+                  }
+                  + (if $msg == "" then {} else {description: $msg} end)
+                )]
+              }')
+
+        # Feed the payload via stdin (not an argv), so its UTF-8 bytes reach curl intact.
+        code=$(printf '%s' "$payload" | curl -sS -o /dev/null -w '%{http_code}' \
+          -H "Content-Type: application/json" \
+          -X POST --data-binary @- "$WEBHOOK")
+
+        # Discord returns 204 (no ?wait) / 200 (?wait=true) on success.
+        if [ "$code" != "204" ] && [ "$code" != "200" ]; then
+          echo "discord-notify: webhook POST failed (HTTP $code)" >&2
+          exit 1
+        fi
+        echo "discord-notify: sent (${word})"

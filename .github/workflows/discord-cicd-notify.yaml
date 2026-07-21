@@ -1,0 +1,55 @@
+name: Discord CI/CD notify
+
+# Reusable wrapper around the `discord-notify` composite action for the common case: a trailing job
+# that pings Discord once per run. Call it from a repo like:
+#
+#   jobs:
+#     build: { ... }
+#     notify:
+#       needs: [build]            # list every job whose failure should alert
+#       if: ${{ failure() }}      # only ping on failure; use always() + status input for all outcomes
+#       uses: spectrum-labs-tech/.github/.github/workflows/discord-cicd-notify.yaml@main
+#       secrets: inherit          # passes the DISCORD_CICD_WEBHOOK org/repo secret
+#
+# For surgical per-step/in-job alerts, skip this and use the composite action directly:
+#   - uses: spectrum-labs-tech/.github/actions/discord-notify@main
+#     if: ${{ failure() }}
+#     with:
+#       webhook: ${{ secrets.DISCORD_CICD_WEBHOOK }}
+#       status: failure
+#       message: "unit tests failed"
+
+on:
+  workflow_call:
+    inputs:
+      status:
+        description: "Status to report (default: failure). e.g. failure | success | cancelled."
+        required: false
+        type: string
+        default: "failure"
+      title:
+        description: "Optional title override."
+        required: false
+        type: string
+        default: ""
+      message:
+        description: "Optional extra description line."
+        required: false
+        type: string
+        default: ""
+    secrets:
+      DISCORD_CICD_WEBHOOK:
+        description: "Discord webhook URL for the CI/CD channel."
+        required: true
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Notify Discord
+        uses: spectrum-labs-tech/.github/actions/discord-notify@main
+        with:
+          webhook: ${{ secrets.DISCORD_CICD_WEBHOOK }}
+          status: ${{ inputs.status }}
+          title: ${{ inputs.title }}
+          message: ${{ inputs.message }}
