@@ -2,7 +2,7 @@ name: "Discord notify"
 description: >-
   Post a CI/CD status message to a Discord channel via webhook. Builds a Discord embed from the
   workflow context (repo, branch, commit, actor, run link) plus the given status, and POSTs it.
-  Use it directly as an in-job step (e.g. `if: ${{ failure() }}`) for surgical/per-step alerts, or
+  Use it directly as an in-job step (with an `if: failure()` condition) for surgical/per-step alerts, or
   via the `discord-cicd-notify.yaml` reusable workflow for the common once-per-run failure ping.
   Needs `curl` and `jq` on the runner (present on ubuntu-latest and the self-hosted homelab runners).
 
