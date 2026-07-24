@@ -44,7 +44,7 @@ on:
 
 jobs:
   notify:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, homelab-ci]
     steps:
       - name: Notify Discord
         uses: spectrum-labs-tech/.github/actions/discord-notify@main
