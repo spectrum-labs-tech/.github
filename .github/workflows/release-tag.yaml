@@ -1,0 +1,175 @@
+name: Release tag (semver bump)
+
+# Cut a release tag: work out the next version from the repo's existing v* tags, then create and
+# push it. The ONE copy of this logic for the org — otium and ar15.build each grew their own, in
+# different languages, and one of them silently shipped v2.2.0 where v1.2.0 was meant (see the
+# "why this is not a shell script" note below).
+#
+# It deliberately does NOT build, test, or deploy. It pushes a tag, and each repo's existing
+# `on: push: tags: ["v*"]` release workflow takes it from there — so adopting this changes nothing
+# about how a repo releases, it only replaces how the number is chosen.
+#
+# Call it from a repo with a thin dispatch wrapper:
+#
+#   name: Cut release
+#   on:
+#     workflow_dispatch:
+#       inputs:
+#         bump:
+#           description: "Version bump"
+#           type: choice
+#           options: [patch, minor, major]
+#           default: patch
+#   jobs:
+#     tag:
+#       uses: spectrum-labs-tech/.github/.github/workflows/release-tag.yaml@main
+#       with:
+#         bump: ${{ inputs.bump }}
+#       secrets: inherit
+#
+# ── Why the tag is pushed with a GitHub App token ───────────────────────────────────────────────
+# A tag pushed with the default GITHUB_TOKEN does NOT trigger other workflows — GitHub's recursion
+# guard. The tag would appear and the release pipeline would never run: a silent no-op, which is the
+# worst possible failure for a release button. An App installation token creates a real triggering
+# event, so `on: push: tags` fires exactly as it does for a hand-pushed tag. This is why the org
+# needs APP_ID + APP_PRIVATE_KEY rather than just inheriting GITHUB_TOKEN.
+#
+# ── Why the arithmetic is not a Taskfile shell script ───────────────────────────────────────────
+# It used to be, per repo. Task runs cmds through an embedded Go shell (mvdan/sh) whose variable
+# names are CASE-INSENSITIVE on Windows: `M` and `m` were one variable, so parsing "1.1.8" left both
+# holding the minor component and a single increment moved both. `minor` produced v2.2.0 and `major`
+# produced v0.0.0 — and bash computes both correctly, so checking it in a terminal passed while the
+# release broke. Running here, on a Linux runner in real bash, removes that entire class of problem.
+
+on:
+  workflow_call:
+    inputs:
+      bump:
+        description: "patch | minor | major. Ignored when `tag` is supplied."
+        required: false
+        type: string
+        default: ""
+      tag:
+        description: "Explicit vX.Y.Z to cut, bypassing the bump arithmetic."
+        required: false
+        type: string
+        default: ""
+      ref:
+        description: "Commit or ref to tag. Defaults to the branch the workflow was dispatched from."
+        required: false
+        type: string
+        default: ""
+      runner:
+        description: 'JSON runs-on value. Defaults to the org self-hosted CI pool; a caller outside the org must pass e.g. ''"ubuntu-latest"''.'
+        required: false
+        type: string
+        default: '["self-hosted", "homelab-ci"]'
+    secrets:
+      APP_ID:
+        description: "GitHub App id. The App needs Contents: write on the calling repo."
+        required: true
+      APP_PRIVATE_KEY:
+        description: "GitHub App private key (PEM)."
+        required: true
+    outputs:
+      tag:
+        description: "The tag that was created and pushed."
+        value: ${{ jobs.tag.outputs.tag }}
+
+jobs:
+  tag:
+    runs-on: ${{ fromJSON(inputs.runner) }}
+    outputs:
+      tag: ${{ steps.next.outputs.tag }}
+    steps:
+      # Minted before checkout so the token is what persists as the push credential — that is what
+      # makes the resulting tag push trigger the caller's release workflow.
+      - name: Mint GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
+      # fetch-depth: 0 for the full tag list — the whole computation reads existing tags, and a
+      # shallow clone would silently see none and start from v0.0.0.
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.ref }}
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Work out the next tag
+        id: next
+        env:
+          BUMP: ${{ inputs.bump }}
+          EXPLICIT: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+
+          if [ -n "$EXPLICIT" ] && [ -n "$BUMP" ]; then
+            echo "::error::Pass either bump or tag, not both (got bump=$BUMP tag=$EXPLICIT)."
+            exit 1
+          fi
+
+          if [ -n "$EXPLICIT" ]; then
+            case "$EXPLICIT" in
+              v[0-9]*.[0-9]*.[0-9]*) ;;
+              *) echo "::error::tag must be v-prefixed semver, e.g. v1.2.0 (got '$EXPLICIT')."; exit 1 ;;
+            esac
+            new="$EXPLICIT"
+            latest="(explicit)"
+          else
+            case "$BUMP" in
+              patch|minor|major) ;;
+              "") echo "::error::Pass bump (patch|minor|major) or an explicit tag."; exit 1 ;;
+              *) echo "::error::bump must be patch, minor or major (got '$BUMP')."; exit 1 ;;
+            esac
+
+            # Highest existing v* tag by semver ordering. The refs/tags/v* glob deliberately skips
+            # any moving pointer tag (e.g. `latest`), which is not a version and would win a plain
+            # sort. No tags yet means the first release starts from v0.0.0.
+            latest="$(git for-each-ref --sort=-v:refname --count=1 --format='%(refname:short)' 'refs/tags/v*')"
+            [ -n "$latest" ] || latest="v0.0.0"
+
+            # Named in full. Two variables differing only by case is what broke the per-repo
+            # versions on Windows; there is no reason to risk the same shape again here.
+            version="${latest#v}"
+            major="${version%%.*}"
+            rest="${version#*.}"
+            minor="${rest%%.*}"
+            patch="${rest#*.}"
+            patch="${patch%%[-+]*}"
+
+            case "$BUMP" in
+              major) major=$((major + 1)); minor=0; patch=0 ;;
+              minor) minor=$((minor + 1)); patch=0 ;;
+              patch) patch=$((patch + 1)) ;;
+            esac
+            new="v${major}.${minor}.${patch}"
+          fi
+
+          if git rev-parse -q --verify "refs/tags/${new}" >/dev/null 2>&1; then
+            echo "::error::Tag ${new} already exists."
+            exit 1
+          fi
+
+          echo "tag=${new}" >> "$GITHUB_OUTPUT"
+          echo "previous=${latest}" >> "$GITHUB_OUTPUT"
+          echo "### Release \`${new}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| previous | bump | new | commit |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| --- | --- | --- | --- |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| \`${latest}\` | ${BUMP:-explicit} | \`${new}\` | \`$(git rev-parse --short HEAD)\` |" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Tag and push
+        env:
+          NEW_TAG: ${{ steps.next.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag "$NEW_TAG"
+          git push origin "$NEW_TAG"
+          echo "pushed $NEW_TAG — the caller's \`on: push: tags\` release workflow takes it from here"
