@@ -28,7 +28,7 @@ on:
         type: string
         default: "failure"
       title:
-        description: "Optional title override."
+        description: "Optional override for the title text after the repo-name prefix."
         required: false
         type: string
         default: ""

@@ -15,7 +15,10 @@ inputs:
     required: false
     default: "failure"
   title:
-    description: "Optional title override. Default is derived from status + workflow name."
+    description: >-
+      Optional override for the part of the title after the repo name. Default is derived from
+      status + workflow name. The repo name is always prefixed, because a phone notification shows
+      only the embed title -- the body fields are not visible until the message is opened.
     required: false
     default: ""
   message:
@@ -46,6 +49,9 @@ runs:
         esac
 
         short_sha="${GITHUB_SHA:0:7}"
+        # Bare repo name for the title. The org prefix is the same for every caller, so it is
+        # noise in a notification; the "Repo" field below still carries the full owner/repo.
+        repo_short="${GITHUB_REPOSITORY##*/}"
         branch="${GITHUB_REF_NAME:-${GITHUB_REF:-unknown}}"
         run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
         commit_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/commit/${GITHUB_SHA}"
@@ -60,6 +66,7 @@ runs:
           --arg msg "$MESSAGE_IN" \
           --argjson color "$color" \
           --arg repo "$GITHUB_REPOSITORY" \
+          --arg repo_short "$repo_short" \
           --arg branch "$branch" \
           --arg sha "$short_sha" \
           --arg commit_url "$commit_url" \
@@ -75,7 +82,8 @@ runs:
             | {
                 embeds: [(
                   {
-                    title: (if $title_override == "" then ($emoji + " CI " + $word + ": " + $wf) else $title_override end),
+                    title: ($emoji + " " + $repo_short + " \u2014 "
+                            + (if $title_override == "" then ("CI " + $word + ": " + $wf) else $title_override end)),
                     url: $run_url,
                     color: $color,
                     fields: [

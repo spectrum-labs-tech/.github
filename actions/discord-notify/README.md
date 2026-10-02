@@ -60,8 +60,14 @@ no downstream job to hang a trailing notify on:
 | --------- | -------- | ------------------ | ------------------------------------------------------------ |
 | `webhook` | yes      | —                  | Discord webhook URL. Always a secret.                        |
 | `status`  | no       | `failure`          | `success` / `failure` / `cancelled` drive colour + emoji.    |
-| `title`   | no       | derived            | Override the embed title.                                    |
+| `title`   | no       | derived            | Override the title text _after_ the repo-name prefix.        |
 | `message` | no       | —                  | Extra description line.                                      |
 
-The embed auto-includes repo, branch, short commit (linked), actor, workflow, and a link to the run.
+The embed title always leads with the repo name -- `❌ ar15.build — CI failed: Merge to main` --
+because a Discord phone notification shows only the title; the fields below it are invisible until the
+message is opened, so a bare `CI failed: Merge to main` is unattributable across the ~8 repos that post
+to the one channel.
+
+The embed body auto-includes repo (full `owner/repo`), branch, short commit (linked), actor, workflow,
+and a link to the run.
 Needs `curl` + `jq` on the runner (present on `ubuntu-latest` and the self-hosted homelab runners).
